@@ -81,6 +81,18 @@ curl -X GET ${ECR_API}/builds/sage/simple/1.0 -H "Authorization: sage ${SAGE_USE
 ```
 
 
+## upload images
+
+```bash
+curl ${ECR_API}/upload/image/nconrad/helloword-ml -H "Authorization: sage ${SAGE_USER_TOKEN}" -F "files[]=@test-data/test-image.jpg" | jq .
+```
+
+## upload science description
+
+```bash
+curl ${ECR_API}/upload/science-description/nconrad/helloword-ml -H "Authorization: sage ${SAGE_USER_TOKEN}" -F "files[]=@test-data/my-science.md" | jq .
+```
+
 ## open Jenkins UI in browser
 [http://localhost:8082](http://localhost:8082)
 

@@ -9,6 +9,7 @@
 import os
 import sys
 import logging
+from io import StringIO
 
 from flask import Flask
 from flask_cors import CORS
@@ -16,8 +17,8 @@ from flask.views import MethodView
 
 
 import MySQLdb
-from flask import request
-from flask import abort, jsonify
+from flask import request, abort, jsonify, send_from_directory
+
 
 import re
 #import uuid
@@ -43,8 +44,11 @@ import base64
 
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
 from werkzeug.exceptions import HTTPException
+from werkzeug.utils import secure_filename
 
 from prometheus_client import Counter, make_wsgi_app
+
+UPLOAD_FOLDER = 'file-uploads/'
 
 app_submission_counter = Counter("app_submission_counter", "This metric counts the total number of successful app submissions.")
 build_request_counter = Counter("build_request_counter", "This metric counts the total number of requested builds.")
@@ -52,15 +56,6 @@ build_request_counter = Counter("build_request_counter", "This metric counts the
 
 # refs/tags/<tagName> or  refs/heads/<branchName>
 #t.substitute({'git_url' : 'https://github.com/sagecontinuum/sage-cli.git'})
-
-
-
-
-
-
-
-
-
 
 
 
@@ -1049,8 +1044,6 @@ class RepositoriesList(MethodView):
 
 class Repository(MethodView):
     def get(self, namespace, repository):
-
-
         requestUser = request.environ.get('user', "")
         isAdmin = request.environ.get('admin', "")
 
@@ -1065,6 +1058,7 @@ class Repository(MethodView):
 
         repo_obj["versions"] = app_list
         return jsonify(repo_obj)
+
 
     # delete repository (and permissions) if it is empty
     @login_required
@@ -1193,6 +1187,81 @@ class Permissions(MethodView):
 
         return jsonify(obj)
 
+
+
+IMAGE_EXTENSIONS = set(['png', 'jpg', 'jpeg', 'gif'])
+SCIENCE_EXTENSIONS  = set(['md'])
+
+def is_file_allowed(filename, kind):
+    '''whitelists file extensions'''
+
+    if (kind == 'image'):
+        return '.' in filename and filename.rsplit('.', 1)[1].lower() in IMAGE_EXTENSIONS
+    elif (kind == 'science-description'):
+        return '.' in filename and filename.rsplit('.', 1)[1].lower() in SCIENCE_EXTENSIONS
+
+
+# /upload/{kind}/{namepsace}/{repository}
+class UploadFiles(MethodView):
+
+    def post(self, kind, namespace, repository):
+        '''
+        image uploader
+
+        api example:
+            curl -X POST http://localhost:8080/upload/image/<namespace>/<repo> -F "files[]=@tests/car.jpg"
+        '''
+
+        if (kind not in ['image', 'science-description']):
+            raise ErrorResponse(f'Invalid file "kind"')
+
+        try:
+            request.files
+        except OSError as e:
+            print("ERROR: on touch of request.files")
+
+        files = request.files.getlist("files[]")
+        ecr_db = ecrdb.EcrDB()
+
+        # save each file
+        for f in files:
+            try:
+                filename = secure_filename(f.filename)
+                if is_file_allowed(filename, kind):
+                    # create folder for repo (if one does not exist)
+                    folder = app.config['UPLOAD_FOLDER']
+
+                    # determine file path
+                    if (kind == 'image'):
+                        path = os.path.join(folder, namespace, repository, 'images')
+                    elif (kind == 'science-description'):
+                        path = os.path.join(folder, namespace, repository, 'science')
+
+                    os.makedirs(path, exist_ok=True)
+
+                    # save file
+                    file_path = os.path.join(path, filename)
+                    f.save(file_path)
+
+                    # add entry to FileUpload table
+                    if (kind == 'image'):
+                        ecr_db.addImage(namespace, repository, file_path)
+                    elif (kind == 'science-description'):
+                        ecr_db.addSciDescription(namespace, repository, file_path)
+
+                    print(f'uploaded file: {filename}')
+                else:
+                    print(f'skipping file {filename} with invalid type of {f.content_type}')
+            except OSError as e:
+                raise ErrorResponse(f'ERROR writing file {filename}: {StringIO(str(e)).getvalue()}', status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+        return {'success': True}
+
+
+
+class TestFileServer(MethodView):
+    def get(self, path):
+        return send_from_directory('file-uploads', path)
 
 
 
@@ -1344,6 +1413,10 @@ def createJenkinsName(app_spec):
 app = Flask(__name__)
 CORS(app)
 app.config["PROPAGATE_EXCEPTIONS"] = True
+os.makedirs(os.path.join(app.instance_path, UPLOAD_FOLDER), exist_ok=True)
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER  # todo(nc): move to docker configuration
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB limit
+app.config['CHUNK_SIZE'] = 4096
 app.wsgi_app = ecr_middleware(app.wsgi_app)
 
 
@@ -1377,11 +1450,8 @@ def handle_invalid_usage(error):
 app.add_url_rule('/', view_func=Base.as_view('appsBase'))
 app.add_url_rule('/healthy', view_func=Healthy.as_view('healthy'), strict_slashes=False)
 app.add_url_rule('/submit', view_func=Submit.as_view('submitAPI'), strict_slashes=False)   #  this is a shortcut, replacing POST to /apps/<string:namespace>/<string:repository>
-#app.add_url_rule('/apps/<string:app_id>', view_func=Apps.as_view('appsAPI'))
 
-#app.add_url_rule('/apps', view_func=NamespacesList.as_view('namespacesListAPI'))
 app.add_url_rule('/apps', view_func=AppsGlobal.as_view('appsGlobal'), strict_slashes=False)
-
 app.add_url_rule('/apps/<string:namespace>', view_func=AppsGlobal.as_view('AppsGlobal_namespaces'), strict_slashes=False)
 app.add_url_rule('/apps/<string:namespace>/<string:repository>', view_func=AppsGlobal.as_view('AppsGlobal_repo'), strict_slashes=False)
 app.add_url_rule('/apps/<string:namespace>/<string:repository>/<string:version>', view_func=Apps.as_view('appsAPI'))
@@ -1397,7 +1467,6 @@ app.add_url_rule('/permissions/<string:namespace>/<string:repository>', view_fun
 app.add_url_rule('/permissions/<string:namespace>', view_func=Permissions.as_view('permissionsAPI_3'), methods=['GET', 'PUT', 'DELETE'], strict_slashes=False)
 
 #app.add_url_rule('/apps/<string:namespace>/<string:repository>/<version>/build', view_func=Builds.as_view('buildAPI'))
-
 #app.add_url_rule('/permissions/<string:app_id>', view_func=Permissions.as_view('permissionsAPI'))
 #app.add_url_rule('/apps/<string:app_id>/permissions', view_func=Permissions.as_view('permissionsAPI'))
 
@@ -1407,6 +1476,10 @@ app.add_url_rule('/builds/<string:namespace>/<string:repository>/<string:version
 app.add_url_rule('/authz', view_func=AuthZ.as_view('authz'))
 
 app.add_url_rule('/<path:path>', view_func=CatchAll.as_view('catchAll'))
+
+
+app.add_url_rule('/upload/<string:kind>/<string:namespace>/<string:repository>', view_func=UploadFiles.as_view('uploadFileAPI'), strict_slashes=False)
+app.add_url_rule('/file-uploads/<path:path>', view_func=TestFileServer.as_view('testFileServer'), strict_slashes=False)
 
 
 

@@ -56,6 +56,20 @@ CREATE TABLE IF NOT EXISTS SageECR.Repositories (
 );
 
 
+/*
+    File uploads (currently only used for images).
+    (namespace, name) Corresponds to primary key of repository
+*/
+CREATE TABLE IF NOT EXISTS SageECR.FileUploads (
+    id                    INT NOT NULL AUTO_INCREMENT,
+    namespace             VARCHAR(32) NOT NULL,
+    name                  VARCHAR(256) NOT NULL,
+    file_path             VARCHAR(256) NOT NULL,
+    type                  VARCHAR(32),
+    description           TEXT,
+    PRIMARY KEY (id)
+);
+
 
 /* Owner of repositories is the namespace owner  */
 

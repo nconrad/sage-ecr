@@ -501,15 +501,13 @@ class EcrDB():
 
         fields = ["namespace" , "name" , "owner_id", "description","external_link"]
         fields_str = ",".join(fields)
-        stmt = f'''SELECT DISTINCT {fields_str} FROM Repositories INNER JOIN Permissions ON {sub_stmt} {owner_condition} {namespace_condition}    AND {permissions_stmt}'''
+        stmt = f'''SELECT DISTINCT {fields_str} FROM Repositories INNER JOIN Permissions ON {sub_stmt} {owner_condition} {namespace_condition}    AND {permissions_stmt};'''
 
 
 
         debug_stmt = stmt
         for key in query_data:
             debug_stmt = debug_stmt.replace("%s", key, 1)
-
-
 
 
         logger.debug(f'(listRepositories) debug stmt: {debug_stmt}')
@@ -519,24 +517,42 @@ class EcrDB():
         #self.cur.execute(stmt , (namespace, user))
         #self.cur.execute(debug_stmt )
 
-
         rows = self.cur.fetchall()
+
+        # we'll want to join in images, so get "repo id" list first
+        repo_ids = [f"{r[0]}/{r[1]}" for r in rows]
+        format_strings = ','.join(['%s'] * len(repo_ids))
+
+        # todo(nc): optimize this query!?
+        stmt = f'SELECT concat(namespace,"/",name) AS repo_id, file_path FROM FileUploads WHERE type = "image" HAVING repo_id IN ({format_strings});'
+        self.cur.execute(stmt, tuple(repo_ids))
+        images = self.cur.fetchall()
+
+        # science thing
+        stmt = f'SELECT concat(namespace,"/",name) AS repo_id, file_path FROM FileUploads WHERE type = "science-description" HAVING repo_id IN ({format_strings});'
+        self.cur.execute(stmt, tuple(repo_ids))
+        sci_descript = self.cur.fetchone()
+
+
+        print(f'images{images}')
 
         rep_list = []
         logger.debug(f'len(rows): {len(rows)}')
         for row in rows:
-            #print(f'row: {row}', file=sys.stderr)
-            obj = {}
+            obj = {
+                'type': 'repository',
+                'imgs': [img[1] for img in images if img[0] == f'{row[0]}/{row[1]}'], # todo(nc): get paths.  why not use dicts!?
+                'science_description': sci_descript[0]
+            }
 
-            #obj = dict(zip(fields, row))
-            obj["type"]="repository"
             for pos, field in enumerate(fields):
                 if row[pos]:
                     obj[field] = row[pos]
                 else:
                     obj[field] = ""
+
             rep_list.append(obj)
-            #rep_list.append({"type": "repository", "namespace": row[0], "name": row[1], "owner_id": row[2]})
+
 
         return rep_list
 
@@ -806,10 +822,24 @@ class EcrDB():
         if len(row) != 3 :
             raise Exception("Number of columns wrong")
 
-        returnObj = {}
-        returnObj["namespace"] = row[0]
-        returnObj["name"] = row[1]
-        returnObj["owner_id"] = row[2]
+
+        stmt = f'SELECT file_path FROM FileUploads WHERE type = "image" AND namespace = %s AND name = %s;'
+        self.cur.execute(stmt, (namespace, name))
+        images = self.cur.fetchall()
+
+        # science thing
+        stmt = f'SELECT file_path FROM FileUploads WHERE type = "science-description" AND namespace = %s AND name = %s;'
+        self.cur.execute(stmt, (namespace, name))
+        sci_descript = self.cur.fetchone()
+
+        returnObj = {
+            'namespace': row[0],
+            'name': row[1],
+            'owner_id': row[2],
+            'images': [img[0] for img in images],
+            'science_description': sci_descript[0] if sci_descript else None
+        }
+
         return returnObj, True
 
     def deleteRepository(self, namespace, name):
@@ -860,6 +890,31 @@ class EcrDB():
         self.cur.execute(stmt, ("repository", full_name, "USER", owner_id, "FULL_CONTROL"))
 
 
+        self.db.commit()
+        return 1
+
+
+
+    def addImage(self, namespace, name, file_path):
+        stmt = 'INSERT INTO FileUploads (namespace, name, file_path, type, description) VALUES (%s, %s, %s, %s, %s)'
+        print(f'stmt: {stmt} namespace={namespace} name={name} app_id={file_path}', file=sys.stderr)
+
+        self.cur.execute(stmt, (namespace, name, file_path, "image", ""))
+        self.db.commit()
+        return 1
+
+
+    def addSciDescription(self, namespace, name, file_path):
+        file_type = "science-description"
+
+        stmt = f'DELETE FROM FileUploads WHERE namespace = %s AND name = %s AND type = %s'
+        self.cur.execute(stmt, (namespace, name, file_type))
+        self.db.commit()
+
+        stmt = 'INSERT INTO FileUploads (namespace, name, file_path, type, description) VALUES (%s, %s, %s, %s, %s)'
+        print(f'stmt: {stmt} namespace={namespace} name={name} app_id={file_path}', file=sys.stderr)
+
+        self.cur.execute(stmt, (namespace, name, file_path, file_type, ""))
         self.db.commit()
         return 1
 

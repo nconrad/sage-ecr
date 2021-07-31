@@ -1,6 +1,8 @@
 temp/
 docker_auth/docker_auth/
 
+file-uploads/
+
 .vscode/*
 
 # Byte-compiled / optimized / DLL files
